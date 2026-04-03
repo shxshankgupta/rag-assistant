@@ -1,0 +1,98 @@
+# =========================
+# 🐍 Python
+# =========================
+pycache/
+.py[cod]
+.pyo
+.pyd
+.Python
+.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# =========================
+# 🌐 Frontend (Next.js / Node)
+# =========================
+node_modules/
+.next/
+out/
+dist/
+
+# Logs
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+pnpm-debug.log
+
+# =========================
+# 🔐 Environment Variables
+# =========================
+.env
+.env
+!.env.example
+
+# =========================
+# 🗄️ Data / Runtime Files
+# =========================
+# Uploaded files
+data/uploads/
+# FAISS index
+data/faiss_index/
+# SQLite DB
+data/.db
+data/.db-shm
+data/.db-wal
+*.sqlite3
+*.db
+
+# =========================
+# 🧪 Testing / Coverage
+# =========================
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# =========================
+# 🧠 ML / AI (optional safety)
+# =========================
+*.pt
+*.pth
+*.onnx
+*.bin
+*.model
+*.ckpt
+
+# =========================
+# 🛠️ IDE / Editor
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# =========================
+# 🐳 Docker / Logs
+# =========================
+.log
+docker-compose.override.yml
+
+# =========================
+# 🍎 OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# 🧬 Alembic (Migrations)
+# =========================
+# (Keep migrations in production projects)
+# alembic/versions/.py
+# !alembic/versions/.gitkee
