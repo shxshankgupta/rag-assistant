@@ -1,11 +1,16 @@
 import json
-import os
 from collections.abc import AsyncGenerator
 from time import perf_counter
+from typing import Any, Protocol, cast
 
 import httpx
 import tiktoken
 from groq import AsyncGroq
+from groq.types.chat import (
+    ChatCompletionMessageParam,
+    ChatCompletionSystemMessageParam,
+    ChatCompletionUserMessageParam,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +43,16 @@ NO_CONTEXT_ANSWER = (
     "I could not find relevant information in the selected document(s) "
     "to answer that question."
 )
+
+
+class ChatClient(Protocol):
+    model: str
+
+    async def chat(self, prompt: str) -> str:
+        ...
+
+    def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+        ...
 
 
 class OllamaChatClient:
@@ -73,7 +88,7 @@ class OllamaChatClient:
         )
         return content.strip() if isinstance(content, str) else ""
 
-    async def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def _stream_chat_impl(self, prompt: str) -> AsyncGenerator[str, None]:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -100,7 +115,6 @@ class OllamaChatClient:
                         continue
 
                     content = chunk.get("response", "")
-
                     if content:
                         yield content
 
@@ -112,55 +126,63 @@ class OllamaChatClient:
                         )
                         break
 
+    def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+        return self._stream_chat_impl(prompt)
+
 
 class GroqChatClient:
     def __init__(
         self,
-        api_key: str | None = None,
-        model: str | None = None,
+        api_key: str,
+        model: str,
     ):
-        self.api_key = api_key or getattr(settings, "groq_api_key", None) or os.getenv("GROQ_API_KEY")
-        self.model = model or getattr(settings, "groq_model", "llama-3.3-70b-versatile")
+        self.client = AsyncGroq(api_key=api_key)
+        self.model = model
 
-        if not self.api_key:
-            raise ValueError("GROQ_API_KEY is not configured.")
-
-        self.client = AsyncGroq(api_key=self.api_key)
-
-    def _messages(self, prompt: str) -> list[dict[str, str]]:
-        return [{"role": "user", "content": prompt}]
+    def _build_messages(self, prompt: str) -> list[ChatCompletionMessageParam]:
+        system_message: ChatCompletionSystemMessageParam = {
+            "role": "system",
+            "content": "You are a precise knowledge assistant.",
+        }
+        user_message: ChatCompletionUserMessageParam = {
+            "role": "user",
+            "content": prompt,
+        }
+        return [system_message, user_message]
 
     async def chat(self, prompt: str) -> str:
+        messages = self._build_messages(prompt)
+
         response = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._messages(prompt),
+            messages=messages,
             temperature=0.2,
-            stream=False,
         )
 
-        content = response.choices[0].message.content if response.choices else ""
-        logger.debug(
-            "groq_generate_complete",
-            model=self.model,
-            response_chars=len(content) if isinstance(content, str) else 0,
-        )
+        content = response.choices[0].message.content
         return content.strip() if isinstance(content, str) else ""
 
-    async def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+    async def _stream_chat_impl(self, prompt: str) -> AsyncGenerator[str, None]:
+        messages = self._build_messages(prompt)
+
         stream = await self.client.chat.completions.create(
             model=self.model,
-            messages=self._messages(prompt),
+            messages=messages,
             temperature=0.2,
             stream=True,
         )
 
         async for chunk in stream:
-            if not chunk.choices:
-                continue
+            try:
+                delta = chunk.choices[0].delta.content
+            except (AttributeError, IndexError):
+                delta = None
 
-            delta = chunk.choices[0].delta.content
             if delta:
                 yield delta
+
+    def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+        return self._stream_chat_impl(prompt)
 
 
 class RAGService:
@@ -175,25 +197,39 @@ class RAGService:
         self.embedding_service = embedding_service
         self.vector_store = vector_store
         self.cache_service = cache_service
-
-        self.llm_provider = getattr(settings, "llm_provider", "ollama").lower()
-
-        if self.llm_provider == "groq":
-            self.chat_client = GroqChatClient(
-                api_key=getattr(settings, "groq_api_key", None),
-                model=getattr(settings, "groq_model", "llama-3.3-70b-versatile"),
-            )
-        else:
-            self.chat_client = OllamaChatClient(
-                base_url=settings.ollama_base_url,
-                model=settings.ollama_model,
-                timeout_seconds=settings.ollama_timeout_seconds,
-            )
-
+        self.chat_client = self._build_chat_client()
         self.encoding = self._get_encoding()
 
+    def _build_chat_client(self) -> ChatClient:
+        provider = getattr(settings, "llm_provider", "ollama").lower()
+
+        if provider == "groq":
+            groq_api_key = getattr(settings, "groq_api_key", None)
+            groq_model = getattr(settings, "groq_model", None)
+
+            if not groq_api_key:
+                raise ValueError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
+            if not groq_model:
+                raise ValueError("GROQ_MODEL is required when LLM_PROVIDER=groq")
+
+            logger.info("rag_chat_provider_selected", provider="groq", model=groq_model)
+            return GroqChatClient(
+                api_key=groq_api_key,
+                model=groq_model,
+            )
+
+        logger.info(
+            "rag_chat_provider_selected",
+            provider="ollama",
+            model=settings.ollama_model,
+        )
+        return OllamaChatClient(
+            base_url=settings.ollama_base_url,
+            model=settings.ollama_model,
+            timeout_seconds=settings.ollama_timeout_seconds,
+        )
+
     async def query(self, request: QueryRequest, user_id: str) -> QueryResponse:
-        """Non-streaming RAG query."""
         query_start = perf_counter()
 
         cache_key = await self.cache_service.make_query_response_key(
@@ -247,6 +283,7 @@ class RAGService:
         generation_start = perf_counter()
         answer = await self.chat_client.chat(prompt)
         generation_latency_ms = round((perf_counter() - generation_start) * 1000, 2)
+
         if not answer:
             answer = NO_CONTEXT_ANSWER
 
@@ -259,7 +296,6 @@ class RAGService:
             generation_latency_ms=generation_latency_ms,
             query_latency_ms=round((perf_counter() - query_start) * 1000, 2),
             model=self.chat_client.model,
-            provider=self.llm_provider,
         )
 
         response_payload = QueryResponse(
@@ -278,9 +314,6 @@ class RAGService:
     async def query_stream(
         self, request: QueryRequest, user_id: str
     ) -> AsyncGenerator[str, None]:
-        """
-        Streaming RAG query. Yields Server-Sent Events (SSE) strings.
-        """
         stream_start = perf_counter()
 
         try:
@@ -318,20 +351,18 @@ class RAGService:
                 retrieval_latency_ms=retrieval_latency_ms,
                 query_latency_ms=round((perf_counter() - stream_start) * 1000, 2),
                 model=self.chat_client.model,
-                provider=self.llm_provider,
             )
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             yield "data: [DONE]\n\n"
 
         except Exception as exc:
-            logger.error("stream_error", error=str(exc), provider=self.llm_provider)
+            logger.error("stream_error", error=str(exc))
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
             yield "data: [DONE]\n\n"
 
     async def _retrieve(
         self, request: QueryRequest, user_id: str
     ) -> tuple[list[SourceChunk], str]:
-        """Embed query, search FAISS, validate doc ownership, build context."""
         doc_ids = request.document_ids
         if doc_ids:
             await self._validate_document_ownership(doc_ids, user_id)
