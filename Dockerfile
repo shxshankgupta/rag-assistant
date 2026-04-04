@@ -17,19 +17,20 @@ FROM python:3.12-slim AS runtime
 
 WORKDIR /app
 
-# Non-root user for security
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
-# Install wheels from builder
 COPY --from=builder /build/wheels /wheels
 RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels
 
-# Copy application code
 COPY --chown=appuser:appgroup . .
 
-# Create data directories with correct permissions
-RUN mkdir -p data/uploads data/faiss_index \
-    && chown -R appuser:appgroup data
+RUN mkdir -p /app/data/uploads /app/data/faiss_index /app/data/hf \
+    && chown -R appuser:appgroup /app/data
+
+ENV HOME=/app
+ENV HF_HOME=/app/data/hf
+ENV TRANSFORMERS_CACHE=/app/data/hf
+ENV SENTENCE_TRANSFORMERS_HOME=/app/data/hf
 
 USER appuser
 
@@ -38,4 +39,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
