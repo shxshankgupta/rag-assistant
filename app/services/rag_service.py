@@ -1,9 +1,11 @@
 import json
+import os
 from collections.abc import AsyncGenerator
 from time import perf_counter
 
 import httpx
 import tiktoken
+from groq import AsyncGroq
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,9 +73,7 @@ class OllamaChatClient:
         )
         return content.strip() if isinstance(content, str) else ""
 
-    async def stream_chat(
-        self, prompt: str
-    ) -> AsyncGenerator[str, None]:
+    async def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
         payload = {
             "model": self.model,
             "prompt": prompt,
@@ -113,6 +113,56 @@ class OllamaChatClient:
                         break
 
 
+class GroqChatClient:
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+    ):
+        self.api_key = api_key or getattr(settings, "groq_api_key", None) or os.getenv("GROQ_API_KEY")
+        self.model = model or getattr(settings, "groq_model", "llama-3.3-70b-versatile")
+
+        if not self.api_key:
+            raise ValueError("GROQ_API_KEY is not configured.")
+
+        self.client = AsyncGroq(api_key=self.api_key)
+
+    def _messages(self, prompt: str) -> list[dict[str, str]]:
+        return [{"role": "user", "content": prompt}]
+
+    async def chat(self, prompt: str) -> str:
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=self._messages(prompt),
+            temperature=0.2,
+            stream=False,
+        )
+
+        content = response.choices[0].message.content if response.choices else ""
+        logger.debug(
+            "groq_generate_complete",
+            model=self.model,
+            response_chars=len(content) if isinstance(content, str) else 0,
+        )
+        return content.strip() if isinstance(content, str) else ""
+
+    async def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
+        stream = await self.client.chat.completions.create(
+            model=self.model,
+            messages=self._messages(prompt),
+            temperature=0.2,
+            stream=True,
+        )
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield delta
+
+
 class RAGService:
     def __init__(
         self,
@@ -125,11 +175,21 @@ class RAGService:
         self.embedding_service = embedding_service
         self.vector_store = vector_store
         self.cache_service = cache_service
-        self.chat_client = OllamaChatClient(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_model,
-            timeout_seconds=settings.ollama_timeout_seconds,
-        )
+
+        self.llm_provider = getattr(settings, "llm_provider", "ollama").lower()
+
+        if self.llm_provider == "groq":
+            self.chat_client = GroqChatClient(
+                api_key=getattr(settings, "groq_api_key", None),
+                model=getattr(settings, "groq_model", "llama-3.3-70b-versatile"),
+            )
+        else:
+            self.chat_client = OllamaChatClient(
+                base_url=settings.ollama_base_url,
+                model=settings.ollama_model,
+                timeout_seconds=settings.ollama_timeout_seconds,
+            )
+
         self.encoding = self._get_encoding()
 
     async def query(self, request: QueryRequest, user_id: str) -> QueryResponse:
@@ -199,6 +259,7 @@ class RAGService:
             generation_latency_ms=generation_latency_ms,
             query_latency_ms=round((perf_counter() - query_start) * 1000, 2),
             model=self.chat_client.model,
+            provider=self.llm_provider,
         )
 
         response_payload = QueryResponse(
@@ -257,12 +318,13 @@ class RAGService:
                 retrieval_latency_ms=retrieval_latency_ms,
                 query_latency_ms=round((perf_counter() - stream_start) * 1000, 2),
                 model=self.chat_client.model,
+                provider=self.llm_provider,
             )
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             yield "data: [DONE]\n\n"
 
         except Exception as exc:
-            logger.error("stream_error", error=str(exc))
+            logger.error("stream_error", error=str(exc), provider=self.llm_provider)
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
             yield "data: [DONE]\n\n"
 
