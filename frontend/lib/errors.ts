@@ -12,6 +12,16 @@ export interface ClassifiedError {
   retryable: boolean;
 }
 
+function isClassifiedError(err: unknown): err is ClassifiedError {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'kind' in err &&
+    'message' in err &&
+    'retryable' in err
+  );
+}
+
 function trimMessage(s: string, max = 400): string {
   const t = s.trim();
   return t.length > max ? `${t.slice(0, max)}…` : t;
@@ -65,11 +75,14 @@ export function classifyHttpError(status: number, bodyText: string): ClassifiedE
 }
 
 export function classifyThrownError(err: unknown): ClassifiedError {
+  if (isClassifiedError(err)) {
+    return err;
+  }
   if (err instanceof TypeError) {
     const msg = err.message.toLowerCase();
     if (msg.includes('fetch') || msg.includes('network') || msg.includes('failed to load')) {
       return {
-        kind: 'network',
+          kind: 'network',
         message: 'Could not reach the server. Check your connection and API URL.',
         retryable: true,
       };

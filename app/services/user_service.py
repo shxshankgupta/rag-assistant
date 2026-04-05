@@ -1,4 +1,4 @@
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.exceptions import ConflictError, NotFoundError, UnauthorizedError
@@ -17,14 +17,14 @@ class UserService:
     async def create_user(self, data: UserCreate) -> User:
         # Check email uniqueness
         existing = await self.db.execute(
-            select(User).where(User.email == data.email)
+            select(User).where(func.lower(User.email) == data.email.lower())
         )
         if existing.scalar_one_or_none():
             raise ConflictError(f"Email already registered: {data.email}")
 
         # Check username uniqueness
         existing = await self.db.execute(
-            select(User).where(User.username == data.username)
+            select(User).where(func.lower(User.username) == data.username.lower())
         )
         if existing.scalar_one_or_none():
             raise ConflictError(f"Username already taken: {data.username}")
@@ -47,14 +47,19 @@ class UserService:
             raise NotFoundError("User", user_id)
         return user
 
-    async def get_by_username(self, username: str) -> User | None:
+    async def get_by_username_or_email(self, identifier: str) -> User | None:
         result = await self.db.execute(
-            select(User).where(User.username == username)
+            select(User).where(
+                or_(
+                    func.lower(User.username) == identifier.lower(),
+                    func.lower(User.email) == identifier.lower(),
+                )
+            )
         )
         return result.scalar_one_or_none()
 
-    async def authenticate(self, username: str, password: str) -> User:
-        user = await self.get_by_username(username)
+    async def authenticate(self, identifier: str, password: str) -> User:
+        user = await self.get_by_username_or_email(identifier)
         if not user or not verify_password(password, user.hashed_password):
             raise UnauthorizedError("Invalid username or password")
         if not user.is_active:

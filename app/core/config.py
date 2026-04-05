@@ -30,31 +30,18 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60
     refresh_token_expire_days: int = 7
 
-    # OpenAI (optional now)
-    openai_api_key: str | None = None
-    openai_embedding_model: str = "text-embedding-3-small"
-    openai_chat_model: str = "gpt-4o-mini"
-
     # Local embeddings
-    embedding_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_model_name: str = "hash-embedding-v1"
     embedding_dimension: int = 384
 
     # Groq
-    llm_provider: str = "ollama"
     groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
     groq_model: str = "llama-3.3-70b-versatile"
     groq_timeout_seconds: float = 60.0
 
-    # Ollama
-    ollama_base_url: str = "http://127.0.0.1:11434"
-    ollama_model: str = "qwen2.5:3b"
-    ollama_timeout_seconds: float = 180.0
-
-    # Database / cache / queue
+    # Database / cache
     database_url: str = f"sqlite+aiosqlite:///{(DATA_DIR / 'app.db').as_posix()}"
-    redis_url: str = "redis://localhost:6379/0"
-    broker_url: str = "redis://localhost:6379/0"
-    result_backend: str = "redis://localhost:6379/0"
+    redis_url: str = ""
 
     # Files / vector store
     upload_dir: str = str(DATA_DIR / "uploads")
@@ -67,6 +54,7 @@ class Settings(BaseSettings):
         default="http://localhost:3000,http://127.0.0.1:3000",
         alias="ALLOWED_ORIGINS",
     )
+    allowed_origin_regex: str = Field(default="", alias="ALLOWED_ORIGIN_REGEX")
 
     # Retrieval
     chunk_size: int = 1000
@@ -89,33 +77,32 @@ class Settings(BaseSettings):
     cache_memory_max_items: int = 1000
 
     # Frontend
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = ""
+
+    @staticmethod
+    def _split_csv(value: str) -> list[str]:
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     @property
     def allowed_file_extensions(self) -> list[str]:
         raw = (self.allowed_file_extensions_raw or "").strip()
         if not raw:
             return ["pdf"]
-        return [ext.strip().lower() for ext in raw.split(",") if ext.strip()]
+        return [ext.strip().lower() for ext in self._split_csv(raw)]
 
     @property
     def allowed_origins(self) -> list[str]:
-        raw = (self.allowed_origins_raw or "").strip()
-        if not raw:
-            return ["http://localhost:3000", "http://127.0.0.1:3000"]
-        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+        origins = set(self._split_csv(self.allowed_origins_raw or ""))
+        origins.update(self._split_csv(self.frontend_url or ""))
+
+        if not origins:
+            origins.update({"http://localhost:3000", "http://127.0.0.1:3000"})
+
+        return sorted(origins)
 
     @property
     def origins_list(self) -> list[str]:
         return self.allowed_origins
-
-    @property
-    def celery_broker_url(self) -> str:
-        return self.broker_url
-
-    @property
-    def celery_result_backend(self) -> str:
-        return self.result_backend
 
     @property
     def retrieval_top_k(self) -> int:

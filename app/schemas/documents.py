@@ -14,8 +14,6 @@ class DocumentResponse(BaseModel):
     mime_type: str
     status: DocumentStatus
     chunk_count: int
-    celery_task_id: str | None = None
-    celery_state: str | None = None
     processing_view: str | None = Field(
         default=None,
         description="Human-readable stage: queued | processing | completed | failed",

@@ -1,16 +1,8 @@
 import json
 from collections.abc import AsyncGenerator
 from time import perf_counter
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
-import httpx
-import tiktoken
-from groq import AsyncGroq
-from groq.types.chat import (
-    ChatCompletionMessageParam,
-    ChatCompletionSystemMessageParam,
-    ChatCompletionUserMessageParam,
-)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +17,19 @@ from app.services.vector_store import SearchResult, VectorStoreService
 
 settings = get_settings()
 logger = get_logger(__name__)
+
+try:
+    from groq import AsyncGroq
+    from groq.types.chat import (
+        ChatCompletionMessageParam,
+        ChatCompletionSystemMessageParam,
+        ChatCompletionUserMessageParam,
+    )
+except Exception:  # pragma: no cover - optional until dependency is installed
+    AsyncGroq = None  # type: ignore[assignment]
+    ChatCompletionMessageParam = dict[str, Any]  # type: ignore[misc, assignment]
+    ChatCompletionSystemMessageParam = dict[str, Any]  # type: ignore[misc, assignment]
+    ChatCompletionUserMessageParam = dict[str, Any]  # type: ignore[misc, assignment]
 
 SYSTEM_PROMPT = """You are a precise knowledge assistant. Your job is to answer questions
 using ONLY the context provided below. Follow these rules strictly:
@@ -55,87 +60,16 @@ class ChatClient(Protocol):
         ...
 
 
-class OllamaChatClient:
-    def __init__(
-        self,
-        base_url: str | None = None,
-        model: str | None = None,
-        timeout_seconds: float | None = None,
-    ):
-        self.base_url = (base_url or settings.ollama_base_url).rstrip("/")
-        self.model = model or settings.ollama_model
-        self.timeout = httpx.Timeout(timeout_seconds or settings.ollama_timeout_seconds)
-
-    async def chat(self, prompt: str) -> str:
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.2},
-        }
-
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(f"{self.base_url}/api/generate", json=payload)
-            response.raise_for_status()
-            data = response.json()
-
-        content = data.get("response", "")
-        logger.debug(
-            "ollama_generate_complete",
-            model=self.model,
-            done=bool(data.get("done")),
-            response_chars=len(content) if isinstance(content, str) else 0,
-        )
-        return content.strip() if isinstance(content, str) else ""
-
-    async def _stream_chat_impl(self, prompt: str) -> AsyncGenerator[str, None]:
-        payload = {
-            "model": self.model,
-            "prompt": prompt,
-            "stream": True,
-            "options": {"temperature": 0.2},
-        }
-
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/api/generate",
-                json=payload,
-            ) as response:
-                response.raise_for_status()
-
-                async for line in response.aiter_lines():
-                    if not line:
-                        continue
-
-                    try:
-                        chunk = json.loads(line)
-                    except json.JSONDecodeError:
-                        logger.warning("ollama_stream_bad_json", line_preview=line[:200])
-                        continue
-
-                    content = chunk.get("response", "")
-                    if content:
-                        yield content
-
-                    if chunk.get("done", False):
-                        logger.debug(
-                            "ollama_generate_stream_done",
-                            model=self.model,
-                            done=bool(chunk.get("done")),
-                        )
-                        break
-
-    def stream_chat(self, prompt: str) -> AsyncGenerator[str, None]:
-        return self._stream_chat_impl(prompt)
-
-
 class GroqChatClient:
     def __init__(
         self,
         api_key: str,
         model: str,
     ):
+        if AsyncGroq is None:
+            raise ValidationError(
+                "The backend is missing the 'groq' package. Reinstall backend dependencies."
+            )
         self.client = AsyncGroq(api_key=api_key)
         self.model = model
 
@@ -198,35 +132,19 @@ class RAGService:
         self.vector_store = vector_store
         self.cache_service = cache_service
         self.chat_client = self._build_chat_client()
-        self.encoding = self._get_encoding()
 
     def _build_chat_client(self) -> ChatClient:
-        provider = getattr(settings, "llm_provider", "ollama").lower()
-
-        if provider == "groq":
-            groq_api_key = getattr(settings, "groq_api_key", None)
-            groq_model = getattr(settings, "groq_model", None)
-
-            if not groq_api_key:
-                raise ValueError("GROQ_API_KEY is required when LLM_PROVIDER=groq")
-            if not groq_model:
-                raise ValueError("GROQ_MODEL is required when LLM_PROVIDER=groq")
-
-            logger.info("rag_chat_provider_selected", provider="groq", model=groq_model)
-            return GroqChatClient(
-                api_key=groq_api_key,
-                model=groq_model,
-            )
+        if not settings.groq_api_key:
+            raise ValidationError("GROQ_API_KEY is not configured on the backend.")
 
         logger.info(
             "rag_chat_provider_selected",
-            provider="ollama",
-            model=settings.ollama_model,
+            provider="groq",
+            model=settings.groq_model,
         )
-        return OllamaChatClient(
-            base_url=settings.ollama_base_url,
-            model=settings.ollama_model,
-            timeout_seconds=settings.ollama_timeout_seconds,
+        return GroqChatClient(
+            api_key=settings.groq_api_key,
+            model=settings.groq_model,
         )
 
     async def query(self, request: QueryRequest, user_id: str) -> QueryResponse:
@@ -439,11 +357,8 @@ class RAGService:
                 f"Documents not found or not ready: {', '.join(sorted(missing))}"
             )
 
-    def _get_encoding(self):
-        return tiktoken.get_encoding("cl100k_base")
-
     def _count_tokens(self, text: str) -> int:
-        return len(self.encoding.encode(text))
+        return max(1, len(text) // 4)
 
     def _context_budget_tokens(self, query: str) -> int:
         system_tokens = self._count_tokens(SYSTEM_PROMPT.format(context=""))

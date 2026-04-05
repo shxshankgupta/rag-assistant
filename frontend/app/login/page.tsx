@@ -35,12 +35,12 @@ export default function LoginPage() {
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-sm mb-2">Username</label>
+            <label className="block text-sm mb-2">Username or email</label>
             <input
               className="w-full rounded-xl bg-slate-950 border border-slate-800 px-4 py-3 outline-none"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="Enter username"
+              placeholder="Enter username or email"
               required
             />
           </div>

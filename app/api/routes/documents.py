@@ -11,21 +11,20 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 @router.post(
     "/upload",
     response_model=DocumentResponse,
-    status_code=status.HTTP_202_ACCEPTED,
+    status_code=status.HTTP_201_CREATED,
     dependencies=[Depends(enforce_api_rate_limit)],
 )
 async def upload_document(
+    current_user: CurrentUser,
     file: UploadFile = File(...),
-    current_user: CurrentUser = ...,
     doc_svc: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
     """
-    Upload a PDF document. Chunking + embedding run in a Celery worker.
-    Poll GET /documents/{id} for `processing_view` and `celery_state`.
+    Upload a PDF document and process it inline.
+    The response returns once extraction, chunking, embedding, and indexing succeed.
     """
     doc = await doc_svc.upload_document(file, current_user)
-    await doc_svc.enqueue_embedding_task(doc, current_user.id)
-    return document_to_response(doc, include_celery_state=True)
+    return document_to_response(doc)
 
 
 @router.get("/", response_model=DocumentListResponse, dependencies=[Depends(enforce_api_rate_limit)])
@@ -47,9 +46,9 @@ async def get_document(
     current_user: CurrentUser,
     doc_svc: DocumentService = Depends(get_document_service),
 ) -> DocumentResponse:
-    """Get a single document's metadata, Celery task state, and processing stage."""
+    """Get a single document's metadata and processing stage."""
     doc = await doc_svc.get_document(document_id, current_user.id)
-    return document_to_response(doc, include_celery_state=True)
+    return document_to_response(doc)
 
 
 @router.delete(

@@ -8,7 +8,7 @@ export const API_TOKEN = process.env.NEXT_PUBLIC_API_TOKEN;
 // Chat constants
 export const DEFAULT_CHAT_TITLE = 'New Chat';
 export const MESSAGE_SUBMIT_TIMEOUT = 30000; // 30 seconds
-export const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+export const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
 export const ALLOWED_FILE_TYPES = ['application/pdf'];
 
 // UI Constants
@@ -18,7 +18,7 @@ export const AUTO_SCROLL_THRESHOLD = 100; // pixels from bottom to auto-scroll
 
 // Messages
 export const ERROR_MESSAGES = {
-  FILE_TOO_LARGE: 'File is too large. Maximum size is 10MB.',
+  FILE_TOO_LARGE: 'File is too large. Maximum size is 20MB.',
   FILE_TYPE_NOT_ALLOWED: 'File type is not allowed.',
   NETWORK_ERROR: 'Network error. Please try again.',
   STREAM_ERROR: 'Error streaming response. Please try again.',

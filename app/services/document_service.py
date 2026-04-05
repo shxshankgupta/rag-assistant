@@ -1,10 +1,11 @@
+import asyncio
 import uuid
 from pathlib import Path
 
 import aiofiles
 from fastapi import UploadFile
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.exceptions import ValidationError, NotFoundError, ForbiddenError
@@ -14,8 +15,9 @@ from app.models.user import User
 from app.schemas.documents import DocumentListResponse
 from app.services.cache_service import CacheService
 from app.services.document_response_builder import document_to_response
+from app.services.document_processing import chunk_text, extract_pdf_text
 from app.services.embedding_service import EmbeddingService
-from app.services.vector_store import VectorStoreService
+from app.services.vector_store import ChunkMetadata, VectorStoreService
 
 settings = get_settings()
 logger = get_logger(__name__)
@@ -39,14 +41,14 @@ class DocumentService:
         Path(settings.upload_dir).mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ #
-    # Upload & Celery
+    # Upload & processing
     # ------------------------------------------------------------------ #
 
     async def upload_document(self, file: UploadFile, owner: User) -> Document:
-        """Validate/save PDF and persist as pending; embedding runs in Celery."""
-        await self._validate_file(file)
-
-        file_path, filename, file_size = await self._save_file(file, owner.id)
+        """Validate, save, extract, chunk, embed, and index a PDF in one request."""
+        content, ext = await self._validate_file(file)
+        file_path, filename = await self._save_file(content, ext, owner.id)
+        file_size = len(content)
 
         doc = Document(
             owner_id=owner.id,
@@ -55,27 +57,41 @@ class DocumentService:
             file_path=str(file_path),
             file_size=file_size,
             mime_type=file.content_type or "application/pdf",
-            status=DocumentStatus.PENDING,
+            status=DocumentStatus.PROCESSING,
         )
         self.db.add(doc)
         await self.db.flush()
         await self.db.refresh(doc)
         logger.info("document_saved", doc_id=doc.id, name=doc.original_name)
-        doc_count = await self._count_user_documents(owner.id)
-        logger.info("user_document_count", user_id=owner.id, document_count=doc_count)
 
+        try:
+            chunk_count = await self._process_document(doc, owner.id)
+        except Exception:
+            self.vector_store.delete_document(owner.id, doc.id)
+            try:
+                Path(doc.file_path).unlink(missing_ok=True)
+            except OSError as exc:
+                logger.warning("file_delete_failed", path=doc.file_path, error=str(exc))
+            raise
+
+        doc.status = DocumentStatus.READY
+        doc.chunk_count = chunk_count
+        doc.error_message = None
+        await self.db.flush()
+        await self.cache_service.bump_user_corpus_version(owner.id)
+
+        doc_count = await self._count_user_documents(owner.id)
+        logger.info(
+            "document_processed",
+            doc_id=doc.id,
+            chunks=chunk_count,
+            user_id=owner.id,
+            document_count=doc_count,
+        )
         return doc
 
-    async def enqueue_embedding_task(self, doc: Document, user_id: str) -> None:
-        """Dispatch Celery task; stores task id on the document row."""
-        from app.workers.tasks import process_document_embedding
-
-        async_result = process_document_embedding.delay(doc.id, user_id)
-        doc.celery_task_id = async_result.id
-        await self.db.flush()
-
     async def upload_and_process(self, file: UploadFile, owner: User) -> Document:
-        """Backward-compatible helper for callers that only create the row."""
+        """Backward-compatible helper used by tests and older callers."""
         return await self.upload_document(file, owner)
 
     # ------------------------------------------------------------------ #
@@ -92,7 +108,7 @@ class DocumentService:
         logger.info("user_document_count", user_id=owner_id, document_count=len(docs))
         return DocumentListResponse(
             total=len(docs),
-            items=[document_to_response(d, include_celery_state=False) for d in docs],
+            items=[document_to_response(d) for d in docs],
         )
 
     async def get_document(self, doc_id: str, owner_id: str) -> Document:
@@ -127,14 +143,10 @@ class DocumentService:
     # Helpers
     # ------------------------------------------------------------------ #
 
-    async def _validate_file(self, file: UploadFile) -> None:
-        if file.content_type not in ALLOWED_MIME_TYPES:
-            raise ValidationError(
-                f"Unsupported file type: {file.content_type}. Only PDF is accepted."
-            )
+    async def _validate_file(self, file: UploadFile) -> tuple[bytes, str]:
         ext = Path(file.filename or "").suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
-            raise ValidationError(f"Unsupported extension: {ext}")
+            raise ValidationError("Unsupported file type. Only PDF files are accepted.")
 
         content = await file.read()
         await file.seek(0)
@@ -142,14 +154,15 @@ class DocumentService:
             raise ValidationError(
                 f"File too large. Maximum size is {settings.max_upload_size_mb} MB."
             )
+        if not content:
+            raise ValidationError("Uploaded file is empty.")
+        if not content.lstrip().startswith(b"%PDF"):
+            raise ValidationError("Uploaded file is not a valid PDF.")
+        return content, ext
 
     async def _save_file(
-        self, file: UploadFile, owner_id: str
-    ) -> tuple[Path, str, int]:
-        content = await file.read()
-        await file.seek(0)
-
-        ext = Path(file.filename or "file").suffix.lower()
+        self, content: bytes, ext: str, owner_id: str
+    ) -> tuple[Path, str]:
         filename = f"{uuid.uuid4().hex}{ext}"
         owner_dir = Path(settings.upload_dir) / owner_id
         owner_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +171,30 @@ class DocumentService:
         async with aiofiles.open(file_path, "wb") as f:
             await f.write(content)
 
-        return file_path, filename, len(content)
+        return file_path, filename
+
+    async def _process_document(self, doc: Document, user_id: str) -> int:
+        text = await asyncio.to_thread(extract_pdf_text, doc.file_path)
+        chunks = chunk_text(
+            text,
+            chunk_size=settings.chunk_size,
+            chunk_overlap=settings.chunk_overlap,
+        )
+        if not chunks:
+            raise ValidationError("No text chunks could be created from this PDF.")
+
+        embeddings = await self.embedding_service.embed_texts(chunks)
+        metadatas = [
+            ChunkMetadata(
+                document_id=doc.id,
+                document_name=doc.original_name,
+                chunk_index=index,
+                content=chunk,
+            )
+            for index, chunk in enumerate(chunks)
+        ]
+        self.vector_store.add_chunks(user_id, embeddings, metadatas)
+        return len(chunks)
 
     async def _count_user_documents(self, owner_id: str) -> int:
         result = await self.db.execute(

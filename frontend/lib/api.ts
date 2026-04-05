@@ -110,7 +110,6 @@ export interface BackendDocument {
   id: string;
   status: string;
   processing_view?: string | null;
-  celery_state?: string | null;
   error_message?: string | null;
 }
 
