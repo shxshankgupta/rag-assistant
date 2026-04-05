@@ -41,9 +41,9 @@ class Settings(BaseSettings):
 
     # Groq
     llm_provider: str = "ollama"
-    groq_api_key: str | None = None
+    groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
     groq_model: str = "llama-3.3-70b-versatile"
-    ollama_model: str = "qwen2.5:3b"
+    groq_timeout_seconds: float = 60.0
 
     # Ollama
     ollama_base_url: str = "http://127.0.0.1:11434"
